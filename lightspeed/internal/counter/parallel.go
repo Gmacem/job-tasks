@@ -23,7 +23,7 @@ const (
 	batchSize     = 10000
 	windowSize    = 1 << 30
 	maxWindows    = 4
-	windowBufSize = batchSize * 2
+	windowBufSize = 1000
 )
 
 func (c *ParallelCounter) CountIps(filename string) (uint64, error) {
