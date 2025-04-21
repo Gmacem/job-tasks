@@ -21,7 +21,7 @@ func NewParallel() *ParallelCounter {
 
 const (
 	batchSize     = 10000
-	windowSize    = 1 << 14
+	windowSize    = 1 << 30
 	maxWindows    = 4
 	windowBufSize = batchSize * 2
 )
