@@ -3,7 +3,6 @@ package counter
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
@@ -22,56 +21,51 @@ func NewParallel() *ParallelCounter {
 
 const (
 	batchSize     = 10000
-	windowSize    = 1 << 30       // 1GB window size
-	maxWindows    = 4             // Maximum concurrent windows (adjust based on available RAM)
-	windowBufSize = batchSize * 2 // Buffer size for window results channel
+	windowSize    = 1 << 14
+	maxWindows    = 4
+	windowBufSize = batchSize * 2
 )
 
 func (c *ParallelCounter) CountIps(filename string) (uint64, error) {
-	fmt.Println("Start parallel processing")
 	file, err := os.Stat(filename)
 	if err != nil {
-		log.Fatalf("Error opening file: %v", err)
+		return 0, fmt.Errorf("error opening file: %v", err)
 	}
 	fileSize := file.Size()
 
-	// Open file for memory mapping
 	f, err := os.OpenFile(filename, os.O_RDONLY, 0)
 	if err != nil {
 		return 0, fmt.Errorf("error opening file: %v", err)
 	}
 	defer f.Close()
 
-	// Calculate number of windows needed
 	numWindows := (fileSize + windowSize - 1) / windowSize
 
-	// Create channels for window processing
 	results := make(chan []uint32, windowBufSize)
 	errorsCh := make(chan error, maxWindows)
 	windowCh := make(chan int64, maxWindows)
 
 	var wg sync.WaitGroup
 
-	// Start window processor goroutines
 	for i := 0; i < maxWindows; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for windowNum := range windowCh {
 				windowStart := windowNum * windowSize
+				// capture more context if seek hits the middle of an ip address
 				windowEnd := windowStart + windowSize + 16
 				if windowEnd > fileSize {
 					windowEnd = fileSize
 				}
 				currentWindowSize := windowEnd - windowStart
-
 				data, err := syscall.Mmap(int(f.Fd()), windowStart, int(currentWindowSize), syscall.PROT_READ, syscall.MAP_SHARED)
 				if err != nil {
 					errorsCh <- fmt.Errorf("error mapping window %d: %v", windowNum, err)
 					return
 				}
 
-				err = c.processWindow(data, results)
+				err = c.processWindow(data, results, windowStart != 0, windowEnd != fileSize)
 				syscall.Munmap(data)
 				if err != nil {
 					errorsCh <- fmt.Errorf("error processing window %d: %v", windowNum, err)
@@ -111,14 +105,20 @@ func (c *ParallelCounter) CountIps(filename string) (uint64, error) {
 	}
 }
 
-func (c *ParallelCounter) processWindow(data []byte, results chan []uint32) error {
+// skip_first and skip_last are used to skip the first and last ip which were only partially included
+func (c *ParallelCounter) processWindow(data []byte, results chan []uint32, skip_first bool, skip_last bool) error {
 	batch := make([]uint32, 0, batchSize)
 
 	start := 0
 	for {
 		end := bytes.IndexByte(data[start:], '\n')
+		if skip_first {
+			skip_first = false
+			start = end + 1
+			continue
+		}
 		if end == -1 {
-			if start < len(data) {
+			if start < len(data) && !skip_last {
 				line := strings.TrimSpace(string(data[start:]))
 				if parsedIp, err := ipToUint32(line); err == nil {
 					batch = append(batch, parsedIp)
@@ -134,7 +134,7 @@ func (c *ParallelCounter) processWindow(data []byte, results chan []uint32) erro
 
 		if len(batch) >= batchSize {
 			results <- batch
-			batch = batch[:0]
+			batch = make([]uint32, 0, batchSize)
 		}
 
 		start += end + 1
